@@ -1,85 +1,85 @@
 # Technical Plan — Molly Telegram Bot
 
-**Status:** initial plan; implementation not started.
+**Status:** first runnable scaffold committed; local setup and live API testing are the next steps.
 
 ## Architecture
 
 ```
 Telegram
   -> Telegraf bot (Node.js + TypeScript)
-  -> Molly personality / prompt layer
-  -> TokenReply API (OpenAI-compatible chat completions)
+  -> Molly personality prompt + temporary chat history
+  -> TokenReply API (OpenAI-compatible Chat Completions)
   -> Telegram reply
 ```
 
 ## Stack
 
-- Node.js
+- Node.js 22+
 - TypeScript
 - Telegraf
-- TokenReply API
-- In-memory conversation history for the first version
+- OpenAI Node SDK configured with TokenReply's compatible API base URL
+- In-memory conversation history; no database in v1
+
+## Current implementation
+
+- `src/index.ts`: Telegram bot, commands, text handling, safe message splitting, and graceful shutdown.
+- `src/config.ts`: validates environment variables.
+- `src/personality.ts`: Molly's initial system prompt.
+- `src/history.ts`: temporary conversation history, separated by chat ID.
+- `src/ai.ts`: TokenReply Chat Completions client.
+- `.env.example`: local configuration template.
+- `.gitignore`: excludes local secrets and build output.
+
+The first version handles private chats only so group conversations cannot accidentally share one history. Streaming is not enabled yet; the initial version waits for the completed response.
 
 ## Conversation context and memory
 
-For v1, keep only temporary conversation history per Telegram chat in the running process. Do not introduce a database or persistent user profile unless the product requirements change.
+For v1, keep only temporary conversation history per private Telegram chat in the running process. Do not introduce a database or persistent user profile unless the product requirements change.
 
-- `/clear` must clear the current chat's stored conversation history.
-- Restarting the bot may clear in-memory history; this is acceptable for the no-long-term-memory first version.
-- Only pass the current conversation context to the model.
-- Do not claim that Molly remembers information across separate sessions.
+- `/clear` clears the current chat's stored conversation history.
+- Restarting the bot clears in-memory history; this is expected for the no-long-term-memory first version.
+- Only the current conversation context is passed to the model.
+- Molly must not claim to remember information across separate sessions.
 
 ## Initial bot commands
 
-| Command | Purpose |
+| Command | Current behavior |
 |---|---|
-| `/start` | Introduce Molly and start chatting |
-| `/clear` | Clear the current conversation context |
-| `/model` | Show or change the selected model |
-| `/help` | Explain available commands |
+| `/start` | Introduces Molly |
+| `/clear` | Clears the current chat's context |
+| `/model` | Shows the configured model |
+| `/help` | Lists available commands |
+
+Changing the model from Telegram is not implemented yet; set `TOKENREPLY_MODEL` in `.env`.
 
 ## TokenReply integration
 
-The intended integration is an OpenAI-compatible chat-completions request using a Bearer API key. The previously discussed base URL was:
+The implementation uses the OpenAI-compatible Chat Completions endpoint:
 
-`https://api.tokenreply.com/v1`
+- Base URL: `https://api.tokenreply.com/v1`
+- Endpoint: `/chat/completions`
+- Authentication: Bearer API key
+- Model: configured through `TOKENREPLY_MODEL`
 
-The chat-completions path discussed was:
-
-`/chat/completions`
-
-Verify the current TokenReply documentation and the selected model's capabilities during implementation. Do not hard-code assumptions about model names or streaming support.
+The exact model ID must be available to the user's TokenReply account. Do not assume every model is available on every plan or API key.
 
 ## Configuration and security
 
 - Store the Telegram bot token, TokenReply API key, API base URL, and model selection in environment variables.
 - Use a local `.env` file for development.
-- Commit only a `.env.example` containing placeholder values.
-- Add `.env` to `.gitignore`.
-- Never ask the user to paste API secrets into chat or commit secrets to GitHub.
+- Commit only `.env.example` with placeholder values.
+- `.env` is excluded by `.gitignore`.
+- Never paste API secrets into chat or commit secrets to GitHub.
 
-## Reliability and Telegram constraints
+## Reliability and current limitations
 
-- Handle network failures, invalid API responses, timeouts, and rate limits.
-- Keep Telegram message-length limits in mind; split long model replies into safe chunks.
-- If streaming is implemented, edit Telegram messages carefully and avoid excessive update frequency.
-- Prevent overlapping updates from corrupting the same conversation history.
+- The API client has a 60-second timeout and retries transient failures.
+- API errors are logged locally and the user receives a friendly fallback message.
+- Long Telegram replies are split into chunks.
+- History is held in process memory and is lost when the bot restarts.
+- Streaming, persistent storage, per-user settings, and automated tests are not implemented yet.
+- Run `npm run typecheck` and `npm run build` locally after installing dependencies.
 
-## Suggested initial source layout
+## Local setup
 
-```
-src/
-  index.ts
-  config.ts
-  telegram.ts
-  ai.ts
-  personality.ts
-  history.ts
-.env.example
-.gitignore
-package.json
-tsconfig.json
-README.md
-```
-
-This is a proposed layout, not an existing implementation.
+See the root [README](../README.md) for Windows CMD and PowerShell setup instructions.
