@@ -12,11 +12,13 @@ const client = new OpenAI({
 
 export async function getMollyReply(
   history: ChatCompletionMessageParam[],
+  relationshipContext: string,
 ): Promise<string> {
   const response = await client.chat.completions.create({
     model: config.tokenReplyModel,
     messages: [
       { role: "system", content: MOLLY_SYSTEM_PROMPT },
+      { role: "system", content: relationshipContext },
       ...history,
     ],
   });
