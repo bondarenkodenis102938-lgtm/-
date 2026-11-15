@@ -1,7 +1,9 @@
 import { Telegraf } from "telegraf";
 import { getMollyReply } from "./ai.js";
 import { config } from "./config.js";
+import { getOrCreateUser, initializeDatabase } from "./database.js";
 import { addMessage, clearHistory, getHistory } from "./history.js";
+import { getRelationshipContext } from "./relationship.js";
 
 const bot = new Telegraf(config.telegramToken);
 
@@ -23,6 +25,8 @@ function splitTelegramMessage(text: string, limit = 4000): string[] {
 }
 
 bot.start(async (ctx) => {
+  if (ctx.from) getOrCreateUser(ctx.from.id);
+
   await ctx.reply(
     "Привет! Я Молли 🦋\n\nРада знакомству. Можешь просто написать мне — и мы поболтаем.\n\nКоманда /clear очистит историю нашего разговора.",
   );
@@ -55,13 +59,17 @@ bot.on("text", async (ctx) => {
   try {
     await ctx.sendChatAction("typing");
 
+    const profile = getOrCreateUser(ctx.from.id);
     const previousHistory = getHistory(chatId);
     const nextHistory = [
       ...previousHistory,
       { role: "user" as const, content: text },
     ];
 
-    const reply = await getMollyReply(nextHistory);
+    const reply = await getMollyReply(
+      nextHistory,
+      getRelationshipContext(profile),
+    );
 
     addMessage(chatId, { role: "user", content: text }, config.historyMaxMessages);
     addMessage(chatId, { role: "assistant", content: reply }, config.historyMaxMessages);
@@ -82,6 +90,8 @@ bot.catch((error) => {
 });
 
 async function main(): Promise<void> {
+  initializeDatabase();
+
   await bot.telegram.setMyCommands([
     { command: "start", description: "Начать разговор" },
     { command: "clear", description: "Очистить историю чата" },
