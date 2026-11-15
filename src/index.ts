@@ -44,6 +44,9 @@ bot.command("model", async (ctx) => {
 });
 
 bot.on("text", async (ctx) => {
+  // Molly is a one-to-one companion; do not mix multiple users in group-chat history.
+  if (ctx.chat.type !== "private") return;
+
   const text = ctx.message.text.trim();
   if (!text || text.startsWith("/")) return;
 
