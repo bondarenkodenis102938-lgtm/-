@@ -7,17 +7,14 @@ import { getRelationshipContext } from "./relationship.js";
 
 const bot = new Telegraf(config.telegramToken);
 
-const MESSAGE_DEBOUNCE_MS = 1_500;
-const REPLY_COOLDOWN_MS = 2_500;
-const MAX_BATCH_WAIT_MS = 5_000;
+const MESSAGE_DEBOUNCE_MS = 5_000;
 
 interface ChatQueue {
   messages: string[];
   latestContext: Context;
   timer: ReturnType<typeof setTimeout> | null;
-  firstMessageAt: number;
+  lastMessageAt: number;
   processing: boolean;
-  lastReplyAt: number;
 }
 
 const chatQueues = new Map<number, ChatQueue>();
@@ -42,36 +39,40 @@ function splitTelegramMessage(text: string, limit = 4000): string[] {
 function scheduleChatFlush(chatId: number, queue: ChatQueue): void {
   if (queue.timer) clearTimeout(queue.timer);
 
-  const elapsed = Date.now() - queue.firstMessageAt;
-  const debounceDelay = Math.max(
-    0,
-    Math.min(MESSAGE_DEBOUNCE_MS, MAX_BATCH_WAIT_MS - elapsed),
-  );
+  const elapsed = Date.now() - queue.lastMessageAt;
+  const remainingDelay = Math.max(0, MESSAGE_DEBOUNCE_MS - elapsed);
 
   queue.timer = setTimeout(() => {
     queue.timer = null;
     void processChatQueue(chatId, queue);
-  }, debounceDelay);
+  }, remainingDelay);
+}
+
+function formatMessageBatch(messages: string[]): string {
+  if (messages.length === 1) return messages[0];
+
+  const numberedMessages = messages
+    .map((message, index) => `${index + 1}. ${message}`)
+    .join("\n");
+
+  return `Пользователь отправил несколько сообщений подряд, прежде чем ты успела ответить. Прочитай их все по порядку и ответь на них как на одну цельную реплику, учитывая каждое сообщение:\n${numberedMessages}`;
 }
 
 async function processChatQueue(chatId: number, queue: ChatQueue): Promise<void> {
   if (queue.processing || queue.messages.length === 0) return;
 
-  const cooldownRemaining =
-    queue.lastReplyAt + REPLY_COOLDOWN_MS - Date.now();
-
-  if (cooldownRemaining > 0) {
-    queue.timer = setTimeout(() => {
-      queue.timer = null;
-      void processChatQueue(chatId, queue);
-    }, cooldownRemaining);
+  // If the timer fired while a previous AI response was still being generated,
+  // wait only for the remainder of the 5-second quiet period.
+  const remainingDelay = MESSAGE_DEBOUNCE_MS - (Date.now() - queue.lastMessageAt);
+  if (remainingDelay > 0) {
+    scheduleChatFlush(chatId, queue);
     return;
   }
 
   queue.processing = true;
-  const batch = queue.messages.splice(0).join("\n");
+  const batchMessages = queue.messages.splice(0);
+  const batch = formatMessageBatch(batchMessages);
   const ctx = queue.latestContext;
-  queue.firstMessageAt = 0;
 
   try {
     await ctx.sendChatAction("typing");
@@ -100,13 +101,10 @@ async function processChatQueue(chatId: number, queue: ChatQueue): Promise<void>
       "Ой, у меня не получилось ответить. Попробуй ещё раз чуть позже 🥺",
     );
   } finally {
-    queue.lastReplyAt = Date.now();
     queue.processing = false;
 
-    if (queue.messages.length > 0) {
-      if (queue.firstMessageAt === 0) queue.firstMessageAt = Date.now();
-      scheduleChatFlush(chatId, queue);
-    }
+    // Messages received while Molly was replying form the next batch.
+    if (queue.messages.length > 0) scheduleChatFlush(chatId, queue);
   }
 }
 
@@ -148,18 +146,17 @@ bot.on("text", async (ctx) => {
       messages: [],
       latestContext: ctx,
       timer: null,
-      firstMessageAt: 0,
+      lastMessageAt: 0,
       processing: false,
-      lastReplyAt: 0,
     };
     chatQueues.set(chatId, queue);
   }
 
-  if (queue.messages.length === 0) queue.firstMessageAt = Date.now();
   queue.messages.push(text);
   queue.latestContext = ctx;
+  queue.lastMessageAt = Date.now();
 
-  // Combine rapid consecutive messages into one prompt instead of answering each separately.
+  // Every new message restarts the quiet-period timer.
   scheduleChatFlush(chatId, queue);
 });
 
