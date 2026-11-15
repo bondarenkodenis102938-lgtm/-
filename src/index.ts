@@ -166,10 +166,6 @@ function getOrCreateGroupMode(chatId: number, ctx: Context): GroupMode {
 function scheduleGroupAnalysis(chatId: number, mode: GroupMode): void {
   if (mode.timer) clearTimeout(mode.timer);
 
-  const quietPeriodRemaining =
-    MESSAGE_DEBOUNCE_MS - (Date.now() - mode.messages[mode.messages.length - 1]!.sequence /* replaced below */);
-  void quietPeriodRemaining;
-
   mode.timer = setTimeout(() => {
     mode.timer = null;
     void processGroupMessages(chatId, mode);
@@ -205,6 +201,9 @@ async function processGroupMessages(chatId: number, mode: GroupMode): Promise<vo
 
     const decision = await getMollyGroupDecision(contextMessages);
     mode.lastAnalyzedSequence = snapshotSequence;
+
+    // Do not answer based on stale context if new messages arrived while the AI was thinking.
+    if (mode.sequence !== snapshotSequence) return;
 
     // The creator may have put Molly to sleep while the AI was thinking.
     if (mode.activeUntil <= Date.now()) return;
