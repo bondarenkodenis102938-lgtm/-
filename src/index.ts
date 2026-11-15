@@ -1,5 +1,5 @@
 import { Context, Telegraf } from "telegraf";
-import { getMollyGroupDecision, getMollyReply } from "./ai.js";
+import { getMollyGroupDecision, getMollyReply, type GroupMessageInput } from "./ai.js";
 import { config } from "./config.js";
 import { getOrCreateUser, initializeDatabase } from "./database.js";
 import { addMessage, clearHistory, getHistory } from "./history.js";
@@ -21,9 +21,8 @@ interface ChatQueue {
   processing: boolean;
 }
 
-interface GroupMessage {
+interface GroupMessage extends GroupMessageInput {
   sequence: number;
-  text: string;
 }
 
 interface GroupMode {
@@ -189,7 +188,11 @@ async function processGroupMessages(chatId: number, mode: GroupMode): Promise<vo
 
   mode.processing = true;
   const snapshotSequence = mode.sequence;
-  const contextMessages = mode.messages.map((message) => message.text);
+  const contextMessages = mode.messages.map(({ senderId, senderName, text }) => ({
+    senderId,
+    senderName,
+    text,
+  }));
   const ctx = mode.latestContext;
 
   try {
@@ -269,9 +272,9 @@ bot.on("text", async (ctx) => {
 
   if (ctx.chat.type === "group" || ctx.chat.type === "supergroup") {
     const chatId = ctx.chat.id;
-    const mode = getOrCreateGroupMode(chatId, ctx);
     const trigger = normalizeTrigger(text);
     const isCreator = String(ctx.from.id) === config.creatorTelegramId;
+    const mode = getOrCreateGroupMode(chatId, ctx);
 
     if (isCreator && trigger === "молли проснись") {
       if (mode.timer) clearTimeout(mode.timer);
@@ -303,10 +306,11 @@ bot.on("text", async (ctx) => {
     }
 
     mode.sequence += 1;
-    const senderName = ctx.from.first_name || ctx.from.username || "Участник";
     mode.messages.push({
       sequence: mode.sequence,
-      text: `${senderName}: ${text}`,
+      senderId: String(ctx.from.id),
+      senderName: ctx.from.first_name || ctx.from.username || "Участник",
+      text,
     });
 
     if (mode.messages.length > MAX_GROUP_CONTEXT_MESSAGES) {
