@@ -1,13 +1,14 @@
 # Technical Plan — Molly Telegram Bot
 
-**Status:** first runnable scaffold committed; local setup and live API testing are the next steps.
+**Status:** runnable Telegram bot with TokenReply integration, temporary chat history, and persistent user profiles.
 
 ## Architecture
 
 ```
 Telegram
   -> Telegraf bot (Node.js + TypeScript)
-  -> Molly personality prompt + temporary chat history
+  -> SQLite user profile lookup by Telegram user ID
+  -> Molly character + relationship context + temporary chat history
   -> TokenReply API (OpenAI-compatible Chat Completions)
   -> Telegram reply
 ```
@@ -18,68 +19,55 @@ Telegram
 - TypeScript
 - Telegraf
 - OpenAI Node SDK configured with TokenReply's compatible API base URL
-- In-memory conversation history; no database in v1
+- better-sqlite3 for persistent user profiles
+- In-memory conversation history per private chat
 
 ## Current implementation
 
-- `src/index.ts`: Telegram bot, commands, text handling, safe message splitting, and graceful shutdown.
-- `src/config.ts`: validates environment variables.
-- `src/personality.ts`: Molly's initial system prompt.
-- `src/history.ts`: temporary conversation history, separated by chat ID.
+- `src/index.ts`: Telegram bot, commands, user lookup, safe message splitting, and graceful shutdown.
+- `src/config.ts`: validates environment variables, including the creator Telegram ID.
+- `src/personality.ts`: Molly's character prompt.
+- `src/history.ts`: temporary conversation history.
+- `src/database.ts`: SQLite database and user profiles.
+- `src/relationship.ts`: relationship context supplied to the AI.
 - `src/ai.ts`: TokenReply Chat Completions client.
-- `.env.example`: local configuration template.
-- `.gitignore`: excludes local secrets and build output.
 
-The first version handles private chats only so group conversations cannot accidentally share one history. Streaming is not enabled yet; the initial version waits for the completed response.
+## User profiles and relationships
 
-## Conversation context and memory
+- Telegram's numeric sender ID (`ctx.from.id`) is the stable account identifier; usernames and display names are not used for identity.
+- IDs are stored as text in SQLite to avoid accidental numeric conversion.
+- Each user receives a profile on first contact.
+- New users start at affection 0/100 with the `acquaintance` relationship.
+- The creator ID is configured by `MOLLY_CREATOR_ID`, defaulting to `5183481556`.
+- The creator's profile is created during startup and whenever they contact the bot.
+- Creator affection is reset to 100 on profile lookup and its relationship is always `creator`; ordinary profile operations cannot reduce it.
+- The AI receives a short relationship context so it can recognize the creator and the special, quietly adoring relationship.
+- Future affection progression for other users can be added separately without changing Telegram identity lookup.
 
-For v1, keep only temporary conversation history per private Telegram chat in the running process. Do not introduce a database or persistent user profile unless the product requirements change.
+## Data storage
 
-- `/clear` clears the current chat's stored conversation history.
-- Restarting the bot clears in-memory history; this is expected for the no-long-term-memory first version.
-- Only the current conversation context is passed to the model.
-- Molly must not claim to remember information across separate sessions.
-
-## Initial bot commands
-
-| Command | Current behavior |
-|---|---|
-| `/start` | Introduces Molly |
-| `/clear` | Clears the current chat's context |
-| `/model` | Shows the configured model |
-| `/help` | Lists available commands |
-
-Changing the model from Telegram is not implemented yet; set `TOKENREPLY_MODEL` in `.env`.
+- SQLite file: `data/molly.sqlite`.
+- The `data/` directory is excluded from Git.
+- User profiles persist across bot restarts.
+- Conversation history remains in memory and is still cleared by restart or `/clear`.
 
 ## TokenReply integration
-
-The implementation uses the OpenAI-compatible Chat Completions endpoint:
 
 - Base URL: `https://api.tokenreply.com/v1`
 - Endpoint: `/chat/completions`
 - Authentication: Bearer API key
 - Model: configured through `TOKENREPLY_MODEL`
 
-The exact model ID must be available to the user's TokenReply account. Do not assume every model is available on every plan or API key.
-
 ## Configuration and security
 
-- Store the Telegram bot token, TokenReply API key, API base URL, and model selection in environment variables.
-- Use a local `.env` file for development.
-- Commit only `.env.example` with placeholder values.
-- `.env` is excluded by `.gitignore`.
-- Never paste API secrets into chat or commit secrets to GitHub.
+- Store Telegram and TokenReply secrets in local `.env`.
+- Store the creator ID in `MOLLY_CREATOR_ID`.
+- Commit only `.env.example`; never commit `.env` or `data/molly.sqlite`.
 
 ## Reliability and current limitations
 
 - The API client has a 60-second timeout and retries transient failures.
-- API errors are logged locally and the user receives a friendly fallback message.
+- API errors are logged locally and the user receives a friendly fallback error.
 - Long Telegram replies are split into chunks.
-- History is held in process memory and is lost when the bot restarts.
-- Streaming, persistent storage, per-user settings, and automated tests are not implemented yet.
-- Run `npm run typecheck` and `npm run build` locally after installing dependencies.
-
-## Local setup
-
-See the root [README](../README.md) for Windows CMD and PowerShell setup instructions.
+- Persistent profiles are implemented; dynamic affection changes, relationship levels, and persistent conversation memory are not yet implemented.
+- Run `npm install`, `npm run typecheck`, and `npm run build` locally after pulling changes.
