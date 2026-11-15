@@ -1,5 +1,5 @@
 import { Context, Telegraf } from "telegraf";
-import { getMollyReply } from "./ai.js";
+import { getMollyGroupDecision, getMollyReply } from "./ai.js";
 import { config } from "./config.js";
 import { getOrCreateUser, initializeDatabase } from "./database.js";
 import { addMessage, clearHistory, getHistory } from "./history.js";
@@ -8,6 +8,10 @@ import { getRelationshipContext } from "./relationship.js";
 const bot = new Telegraf(config.telegramToken);
 
 const MESSAGE_DEBOUNCE_MS = 5_000;
+const GROUP_ACTIVE_MS = 15 * 60_000;
+const GROUP_REPLY_COOLDOWN_MS = 45_000;
+const MAX_GROUP_REPLIES_PER_SESSION = 5;
+const MAX_GROUP_CONTEXT_MESSAGES = 30;
 
 interface ChatQueue {
   messages: string[];
@@ -17,7 +21,25 @@ interface ChatQueue {
   processing: boolean;
 }
 
+interface GroupMessage {
+  sequence: number;
+  text: string;
+}
+
+interface GroupMode {
+  activeUntil: number;
+  responses: number;
+  lastResponseAt: number;
+  sequence: number;
+  lastAnalyzedSequence: number;
+  messages: GroupMessage[];
+  latestContext: Context;
+  timer: ReturnType<typeof setTimeout> | null;
+  processing: boolean;
+}
+
 const chatQueues = new Map<number, ChatQueue>();
+const groupModes = new Map<number, GroupMode>();
 
 function splitTelegramMessage(text: string, limit = 4000): string[] {
   const chunks: string[] = [];
@@ -61,8 +83,6 @@ function formatMessageBatch(messages: string[]): string {
 async function processChatQueue(chatId: number, queue: ChatQueue): Promise<void> {
   if (queue.processing || queue.messages.length === 0) return;
 
-  // If the timer fired while a previous AI response was still being generated,
-  // wait only for the remainder of the 5-second quiet period.
   const remainingDelay = MESSAGE_DEBOUNCE_MS - (Date.now() - queue.lastMessageAt);
   if (remainingDelay > 0) {
     scheduleChatFlush(chatId, queue);
@@ -75,7 +95,11 @@ async function processChatQueue(chatId: number, queue: ChatQueue): Promise<void>
   const ctx = queue.latestContext;
 
   try {
-    await ctx.sendChatAction("typing");
+    try {
+      await ctx.sendChatAction("typing");
+    } catch (error) {
+      console.warn("Could not send typing status; continuing:", error);
+    }
 
     const profile = getOrCreateUser(ctx.from!.id);
     const previousHistory = getHistory(chatId);
@@ -97,14 +121,123 @@ async function processChatQueue(chatId: number, queue: ChatQueue): Promise<void>
     }
   } catch (error) {
     console.error("Message handling error:", error);
-    await ctx.reply(
-      "Ой, у меня не получилось ответить. Попробуй ещё раз чуть позже 🥺",
-    );
+    try {
+      await ctx.reply(
+        "Ой, у меня не получилось ответить. Попробуй ещё раз чуть позже 🥺",
+      );
+    } catch (sendError) {
+      console.error("Could not send error reply:", sendError);
+    }
   } finally {
     queue.processing = false;
-
-    // Messages received while Molly was replying form the next batch.
     if (queue.messages.length > 0) scheduleChatFlush(chatId, queue);
+  }
+}
+
+function normalizeTrigger(text: string): string {
+  return text
+    .toLocaleLowerCase("ru-RU")
+    .replace(/[^\p{L}\p{N}\s]/gu, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getOrCreateGroupMode(chatId: number, ctx: Context): GroupMode {
+  let mode = groupModes.get(chatId);
+
+  if (!mode) {
+    mode = {
+      activeUntil: 0,
+      responses: 0,
+      lastResponseAt: 0,
+      sequence: 0,
+      lastAnalyzedSequence: 0,
+      messages: [],
+      latestContext: ctx,
+      timer: null,
+      processing: false,
+    };
+    groupModes.set(chatId, mode);
+  }
+
+  return mode;
+}
+
+function scheduleGroupAnalysis(chatId: number, mode: GroupMode): void {
+  if (mode.timer) clearTimeout(mode.timer);
+
+  const quietPeriodRemaining =
+    MESSAGE_DEBOUNCE_MS - (Date.now() - mode.messages[mode.messages.length - 1]!.sequence /* replaced below */);
+  void quietPeriodRemaining;
+
+  mode.timer = setTimeout(() => {
+    mode.timer = null;
+    void processGroupMessages(chatId, mode);
+  }, MESSAGE_DEBOUNCE_MS);
+}
+
+async function processGroupMessages(chatId: number, mode: GroupMode): Promise<void> {
+  if (mode.processing || mode.activeUntil <= Date.now()) return;
+  if (mode.sequence <= mode.lastAnalyzedSequence) return;
+
+  const cooldownRemaining =
+    mode.lastResponseAt + GROUP_REPLY_COOLDOWN_MS - Date.now();
+
+  if (cooldownRemaining > 0) {
+    mode.timer = setTimeout(() => {
+      mode.timer = null;
+      void processGroupMessages(chatId, mode);
+    }, cooldownRemaining);
+    return;
+  }
+
+  mode.processing = true;
+  const snapshotSequence = mode.sequence;
+  const contextMessages = mode.messages.map((message) => message.text);
+  const ctx = mode.latestContext;
+
+  try {
+    try {
+      await ctx.sendChatAction("typing");
+    } catch (error) {
+      console.warn("Could not send group typing status; continuing:", error);
+    }
+
+    const decision = await getMollyGroupDecision(contextMessages);
+    mode.lastAnalyzedSequence = snapshotSequence;
+
+    // The creator may have put Molly to sleep while the AI was thinking.
+    if (mode.activeUntil <= Date.now()) return;
+
+    if (decision.action === "respond") {
+      for (const chunk of splitTelegramMessage(decision.reply)) {
+        await ctx.reply(chunk);
+      }
+
+      mode.lastResponseAt = Date.now();
+      mode.responses += 1;
+
+      if (mode.responses >= MAX_GROUP_REPLIES_PER_SESSION) {
+        mode.activeUntil = 0;
+        mode.messages = [];
+        if (mode.timer) clearTimeout(mode.timer);
+        mode.timer = null;
+        await ctx.reply("Я немного побуду в тишине. Если понадоблюсь — позови меня снова 🦋");
+      }
+    }
+  } catch (error) {
+    mode.lastAnalyzedSequence = snapshotSequence;
+    console.error("Group observation error:", error);
+  } finally {
+    mode.processing = false;
+
+    if (
+      mode.activeUntil > Date.now() &&
+      mode.sequence > mode.lastAnalyzedSequence &&
+      !mode.timer
+    ) {
+      scheduleGroupAnalysis(chatId, mode);
+    }
   }
 }
 
@@ -132,11 +265,62 @@ bot.command("model", async (ctx) => {
 });
 
 bot.on("text", async (ctx) => {
-  // Molly is a one-to-one companion; do not mix multiple users in group-chat history.
-  if (ctx.chat.type !== "private") return;
-
   const text = ctx.message.text.trim();
-  if (!text || text.startsWith("/")) return;
+  if (!text || !ctx.from || ctx.from.is_bot) return;
+
+  if (ctx.chat.type === "group" || ctx.chat.type === "supergroup") {
+    const chatId = ctx.chat.id;
+    const mode = getOrCreateGroupMode(chatId, ctx);
+    const trigger = normalizeTrigger(text);
+    const isCreator = String(ctx.from.id) === config.creatorTelegramId;
+
+    if (isCreator && trigger === "молли проснись") {
+      if (mode.timer) clearTimeout(mode.timer);
+      mode.timer = null;
+      mode.activeUntil = Date.now() + GROUP_ACTIVE_MS;
+      mode.responses = 0;
+      mode.lastResponseAt = 0;
+      mode.sequence = 0;
+      mode.lastAnalyzedSequence = 0;
+      mode.messages = [];
+      mode.latestContext = ctx;
+      await ctx.reply("Я проснулась! Буду немного наблюдать за беседой и иногда подключаться, если мне будет что сказать. У меня есть 15 минут 🦋");
+      return;
+    }
+
+    if (isCreator && trigger === "молли спать") {
+      mode.activeUntil = 0;
+      mode.messages = [];
+      mode.lastAnalyzedSequence = mode.sequence;
+      if (mode.timer) clearTimeout(mode.timer);
+      mode.timer = null;
+      await ctx.reply("Уже засыпаю. Позови, когда понадоблюсь 💤");
+      return;
+    }
+
+    if (mode.activeUntil <= Date.now()) {
+      mode.activeUntil = 0;
+      return;
+    }
+
+    mode.sequence += 1;
+    const senderName = ctx.from.first_name || ctx.from.username || "Участник";
+    mode.messages.push({
+      sequence: mode.sequence,
+      text: `${senderName}: ${text}`,
+    });
+
+    if (mode.messages.length > MAX_GROUP_CONTEXT_MESSAGES) {
+      mode.messages.splice(0, mode.messages.length - MAX_GROUP_CONTEXT_MESSAGES);
+    }
+
+    mode.latestContext = ctx;
+    scheduleGroupAnalysis(chatId, mode);
+    return;
+  }
+
+  // Private companion chats keep their own independent message queue.
+  if (ctx.chat.type !== "private" || text.startsWith("/")) return;
 
   const chatId = ctx.chat.id;
   let queue = chatQueues.get(chatId);
@@ -155,8 +339,6 @@ bot.on("text", async (ctx) => {
   queue.messages.push(text);
   queue.latestContext = ctx;
   queue.lastMessageAt = Date.now();
-
-  // Every new message restarts the quiet-period timer.
   scheduleChatFlush(chatId, queue);
 });
 
